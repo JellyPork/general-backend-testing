@@ -1,16 +1,31 @@
-from flask import Flask, jsonify, request, redirect, url_for, render_template, session, abort
+import click
+from flask import Flask, jsonify, request, redirect, url_for, render_template, session, abort, flash
+from flask_sqlalchemy import SQLAlchemy
+from werkzeug.security import generate_password_hash, check_password_hash
+from flask_migrate import Migrate
+from sqlalchemy.orm import relationship
+from sqlalchemy import Table, Column, Integer, ForeignKey
+
 import os
 from dotenv import load_dotenv
 import requests
 from authlib.integrations.flask_client import OAuth
 import json
-
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import Select
+import time
+from datetime import datetime
 
 # Import and initialize extensions
 from templates.database.extensions import db, migrate, bcrypt, jwt
 # Import the blueprints after app initialization
 from templates.misc.misc_routes import misc_bp
-from templates.auth.auth_routes import auth_bp
+# from templates.auth.auth_routes import auth_bp
 from templates.auth.google_routes import google_auth_bp
 from templates.payment.stripe_routes import payment_bp
 
@@ -23,6 +38,83 @@ app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
+# Set up PostgreSQL models
+
+db = SQLAlchemy(app)
+migrate = Migrate(app, db)
+
+class User(db.Model):
+    __tablename__ = 'users'  # Explicitly set the table name
+    __table_args__ = {'extend_existing': True}
+
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), unique=False, nullable=True)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    password_hash = db.Column(db.String(255))  # Increased from 128 to 255
+    is_google_account = db.Column(db.Boolean, default=False)
+    google_id = db.Column(db.String(128), unique=True, nullable=True)
+    notes = db.relationship('Note', back_populates='user', lazy='dynamic')  # Changed 'user' to 'author'
+
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
+
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
+
+    @staticmethod
+    def get_or_create(email, username=None, password=None, is_google_account=False, google_id=None):
+        user = User.query.filter_by(email=email).first()
+        if user:
+            return user, False
+        else:
+            if is_google_account:
+                # For Google accounts, don't set a username
+                username = None
+            else:
+                # For normal registration, username is required
+                if not username:
+                    raise ValueError("Username is required for normal registration")
+
+            user = User(email=email, username=username, is_google_account=is_google_account, google_id=google_id)
+            if password:
+                user.set_password(password)
+            db.session.add(user)
+            db.session.commit()
+            return user, True
+
+# Association table for note links
+note_links = Table('note_links', db.Model.metadata,
+    Column('source_id', Integer, ForeignKey('note.id')),
+    Column('target_id', Integer, ForeignKey('note.id'))
+)
+
+
+class Note(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(200), nullable=False)
+    content = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    user = relationship('User', back_populates='notes')
+    tags = relationship('Tag', secondary='note_tags', back_populates='notes')
+    linked_to = relationship(
+        'Note', secondary=note_links,
+        primaryjoin=(note_links.c.source_id == id),
+        secondaryjoin=(note_links.c.target_id == id),
+        backref='linked_from'
+    )
+
+class Tag(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(50), nullable=False, unique=True)
+    notes = relationship('Note', secondary='note_tags', back_populates='tags')
+
+note_tags = Table('note_tags', db.Model.metadata,
+    Column('note_id', Integer, ForeignKey('note.id')),
+    Column('tag_id', Integer, ForeignKey('tag.id'))
+)
+
 # Set up JWT
 app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'your_jwt_secret_key')
 app.secret_key = os.getenv('JWT_SECRET_KEY', 'your_jwt_secret_key')
@@ -32,25 +124,122 @@ google = oauth.register(
     name='google',
     client_id=os.getenv('GOOGLE_CLIENT_ID'),
     client_secret=os.getenv('GOOGLE_CLIENT_SECRET'),
-    meta_url=os.getenv('OAUTH2_META_URL'),
-    # access_token_url='https://accounts.google.com/o/oauth2/token',
-    access_token_params=None,
-    authorize_url='https://accounts.google.com/o/oauth2/auth',
-    authorize_params=None,
+    server_metadata_url='https://accounts.google.com/.well-known/openid-configuration',
     client_kwargs={
-        "scope": "openid profile email",
-        # 'code_challenge_method': 'S256'  # enable PKCE
-    },
-
-    server_metadata_url=os.getenv('OAUTH2_META_URL'),
+        'scope': 'openid email profile'
+    }
 )
 
 
 
-db.init_app(app)
+# db.init_app(app)
 migrate.init_app(app, db)
 bcrypt.init_app(app)
 jwt.init_app(app)
+
+
+# Setup Selenium WebDriver
+def get_driver():
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument('--ignore-certificate-errors')
+    chrome_options.add_argument('--ignore-ssl-errors')
+    service = webdriver.ChromeService()
+    driver = webdriver.Chrome()
+    return driver
+
+
+# Route to load and display the website
+@app.route('/load', methods=['POST'])
+def load_website():
+    url = request.json['url']
+    driver = get_driver()
+    driver.get(url)
+    time.sleep(2)  # Wait for the page to load
+
+    # Extract relevant elements: input, button, select, etc.
+    elements = driver.find_elements(By.CSS_SELECTOR, 'input, button, a, select')
+    elements_data = []
+    for element in elements:
+        element_data = {
+            'tag': element.tag_name,
+            'id': element.get_attribute('id'),
+            'text': element.text,
+            'type': element.get_attribute('type'),
+        }
+
+        # For file inputs, allow file selection
+        if element_data['tag'] == 'input' and element_data['type'] == 'file':
+            element_data['action'] = 'file'
+
+        # For other inputs, suggest a sample value that can be inserted
+        elif element_data['tag'] == 'input':
+            element_data['action'] = 'input'
+            element_data['placeholder'] = element.get_attribute('placeholder')
+
+        # For select elements, list available options
+        elif element_data['tag'] == 'select':
+            element_data['action'] = 'select'
+            options = element.find_elements(By.TAG_NAME, 'option')
+            element_data['options'] = [option.text for option in options]
+
+        # For buttons and links, set up click action
+        elif element_data['tag'] in ['button', 'a']:
+            element_data['action'] = 'click'
+
+        elements_data.append(element_data)
+
+    driver.quit()
+    return jsonify(elements_data)
+
+# Route to interact with elements based on queued instructions
+@app.route('/interact', methods=['POST'])
+def interact_with_element():
+    url = request.json['url']
+    instructions = request.json['instructions']  # List of actions
+
+    driver = get_driver()
+    driver.get(url)
+    time.sleep(10)  # Wait for the page to load
+
+    results = []
+    for instruction in instructions:
+        element_id = instruction['element_id']
+        action = instruction['action']
+        value = instruction.get('value', '')
+
+        try:
+            element = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.ID, element_id))
+            )
+
+            # Perform actions based on the element's type and interaction required
+            if action == 'click':
+                element.click()
+                results.append(f"Clicked on {element_id}.")
+            elif action == 'input':
+                element.clear()
+                element.send_keys(value)
+                results.append(f"Inserted '{value}' into {element_id}.")
+            if action == 'select':
+                # Ensure the element is visible and enabled
+                WebDriverWait(driver, 10).until(
+                    EC.element_to_be_clickable((By.ID, element_id))
+                )
+                select = Select(element)
+                select.select_by_visible_text(value)  # or select_by_value(value)
+                print(f"Selected '{value}' from {element_id}.")
+            elif action == 'file':
+                # Upload the file by setting its path to the file input element
+                element.send_keys(value)
+                results.append(f"Uploaded file '{value}' to {element_id}.")
+        except Exception as e:
+            results.append(f"Failed to perform {action} on {element_id}: {str(e)}")
+
+    driver.quit()
+    return jsonify({"status": "completed", "results": results})
 
 @app.route('/check')
 def check():
@@ -62,23 +251,29 @@ def check():
     print(f"jwt: {jwt_secret}")
     return jsonify({"message": "Connection secured."})
 
-@app.route('/')
+@app.route('/welcome')
 def home():
     return "Welcome to the Flask Microservice, General Backend!"
 
+# Route to render the main interface
+@app.route('/')
+def index():
+    if 'user' in session:
+        return redirect(url_for('dashboard'))
+    return redirect(url_for('login'))
+
 @app.route("/home")
 def homepage():
-    print(session)
-    return render_template("home.html", session=session.get("user"),
+    if 'user' in session:
+        return redirect(url_for('dashboard'))
+    return render_template("login.html", session=session.get("user"),
                            pretty=json.dumps(session.get("user"), indent=4))
-
-
 
 # Register the misc blueprint
 app.register_blueprint(misc_bp, url_prefix='/api')
 
 # Register Oauth and auth blueprints
-app.register_blueprint(auth_bp, url_prefix='/api/auth')
+# app.register_blueprint(auth_bp, url_prefix='/api/auth')
 app.register_blueprint(google_auth_bp, url_prefix='/api/auth2')
 
 # Register payment blueprint
@@ -95,28 +290,218 @@ def login_google():
 
 @app.route("/logout")
 def logout():
-    session.pop("user", None)
-    return redirect(url_for("homepage"))
+    session.clear()  # Clear the entire session instead of just popping 'user'
+    return redirect(url_for("login"))
 
 @app.route('/api/authorize/google', methods=['GET', 'POST'])
 def authorize_google():
+    try:
+        token = google.authorize_access_token()
+        resp = google.get('https://openidconnect.googleapis.com/v1/userinfo')
+        userinfo = resp.json()
+        user, created = User.get_or_create(
+            email=userinfo['email'],
+            is_google_account=True,
+            google_id=userinfo['sub']
+        )
+        session['user'] = {'id': user.id, 'email': user.email}
+        return redirect(url_for('dashboard'))
+    except Exception as e:
+        print(f"Error in authorize_google: {str(e)}")
+        flash('An error occurred during Google authentication. Please try again.', 'error')
+        return redirect(url_for('login'))
+
+@app.route('/dashboard')
+def dashboard():
+    if 'user' not in session:
+        flash('Please sign in to access the dashboard.', 'warning')
+        return redirect(url_for('login'))
+
+    user_id = session['user']['id']
+    current_user = User.query.get(user_id)
+    display_name = current_user.username or current_user.email
+
+    # Fetch all users
+    all_users = User.query.all()
+
+    return render_template('dashboard.html', current_user=current_user, display_name=display_name, all_users=all_users)
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if 'user' in session:
+        return redirect(url_for('dashboard'))
+
     if request.method == 'POST':
-        # Handle POST request if needed
-        pass
+        login_id = request.form.get('login_id')  # This can be either username or email
+        password = request.form.get('password')
 
-    print("Google authorization")
-    token = google.authorize_access_token()
-    print("Google authorization")
+        # Check if the login_id is an email
+        if '@' in login_id:
+            user = User.query.filter_by(email=login_id).first()
+        else:
+            user = User.query.filter_by(username=login_id).first()
 
-    # fetch user data with access token
-    personDataUrl = "https://people.googleapis.com/v1/people/me?personFields=genders,birthdays"
-    personData = requests.get(personDataUrl, headers={
-        "Authorization": f"Bearer {token['access_token']}"
-    }).json()
-    token["personData"] = personData
-    # set complete user information in the session
-    session["user"] = token
-    return redirect(url_for("homepage"))
+        if user and user.check_password(password):
+            session['user'] = {'id': user.id, 'username': user.username, 'email': user.email}
+            return redirect(url_for('dashboard'))
+        else:
+            flash('Invalid username/email or password', 'error')
+    return render_template('login.html')
+
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        username = request.form['username']
+        email = request.form['email']
+        password = request.form['password']
+
+        if not username:
+            flash('Username is required', 'error')
+            return render_template('register.html')
+
+        existing_user = User.query.filter_by(email=email).first()
+        if existing_user:
+            if existing_user.is_google_account:
+                flash('This email is already associated with a Google account. Please use Google Sign-In.', 'warning')
+            else:
+                flash('An account with this email already exists. Please login.', 'warning')
+            return redirect(url_for('login'))
+
+        try:
+            new_user, created = User.get_or_create(email=email, username=username, password=password)
+            if created:
+                flash('Registration successful. Please login.', 'success')
+                return redirect(url_for('login'))
+            else:
+                flash('An error occurred during registration. Please try again.', 'error')
+        except ValueError as e:
+            flash(str(e), 'error')
+
+    return render_template('register.html')
+
+
+# API routes
+@app.route('/api/notes', methods=['GET', 'POST'])
+def handle_notes():
+    if 'user' not in session:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    user_id = session['user']['id']
+
+    if request.method == 'GET':
+        notes = Note.query.filter_by(user_id=user_id).all()
+        return jsonify([{
+            'id': note.id,
+            'title': note.title,
+            'content': note.content,
+            'created_at': note.created_at.isoformat(),
+            'updated_at': note.updated_at.isoformat(),
+            'tags': [tag.name for tag in note.tags],
+            'links': [link.id for link in note.linked_to]
+        } for note in notes])
+
+    elif request.method == 'POST':
+        data = request.json
+        new_note = Note(
+            title=data['title'],
+            content=data['content'],
+            user_id=user_id
+        )
+
+        # Handle tags
+        for tag_name in data.get('tags', []):
+            tag = Tag.query.filter_by(name=tag_name).first()
+            if not tag:
+                tag = Tag(name=tag_name)
+            new_note.tags.append(tag)
+
+        # Handle links
+        for link_id in data.get('links', []):
+            linked_note = Note.query.get(link_id)
+            if linked_note and linked_note.user_id == user_id:
+                new_note.linked_to.append(linked_note)
+
+        db.session.add(new_note)
+        db.session.commit()
+
+        return jsonify({
+            'id': new_note.id,
+            'title': new_note.title,
+            'content': new_note.content,
+            'created_at': new_note.created_at.isoformat(),
+            'updated_at': new_note.updated_at.isoformat(),
+            'tags': [tag.name for tag in new_note.tags],
+            'links': [link.id for link in new_note.linked_to]
+        }), 201
+
+@app.route('/api/notes/<int:note_id>', methods=['GET', 'PUT', 'DELETE'])
+def handle_note(note_id):
+    if 'user' not in session:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    user_id = session['user']['id']
+    note = Note.query.filter_by(id=note_id, user_id=user_id).first()
+
+    if not note:
+        return jsonify({'error': 'Note not found'}), 404
+
+    if request.method == 'GET':
+        return jsonify({
+            'id': note.id,
+            'title': note.title,
+            'content': note.content,
+            'created_at': note.created_at.isoformat(),
+            'updated_at': note.updated_at.isoformat(),
+            'tags': [tag.name for tag in note.tags],
+            'links': [link.id for link in note.linked_to]
+        })
+
+    elif request.method == 'PUT':
+        data = request.json
+        note.title = data.get('title', note.title)
+        note.content = data.get('content', note.content)
+
+        # Update tags
+        note.tags = []
+        for tag_name in data.get('tags', []):
+            tag = Tag.query.filter_by(name=tag_name).first()
+            if not tag:
+                tag = Tag(name=tag_name)
+            note.tags.append(tag)
+
+        # Update links
+        note.linked_to = []
+        for link_id in data.get('links', []):
+            linked_note = Note.query.get(link_id)
+            if linked_note and linked_note.user_id == user_id:
+                note.linked_to.append(linked_note)
+
+        db.session.commit()
+
+        return jsonify({
+            'id': note.id,
+            'title': note.title,
+            'content': note.content,
+            'created_at': note.created_at.isoformat(),
+            'updated_at': note.updated_at.isoformat(),
+            'tags': [tag.name for tag in note.tags],
+            'links': [link.id for link in note.linked_to]
+        })
+
+    elif request.method == 'DELETE':
+        db.session.delete(note)
+        db.session.commit()
+        return '', 204
+
+@app.route('/notes')
+def notes_page():
+    if 'user' not in session:
+        flash('Please sign in to access your notes.', 'warning')
+        return redirect(url_for('login'))
+    return render_template('notes.html')
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    with app.app_context():
+        # db.create_all()
+        app.run(host='0.0.0.0', port=5000, debug=True)

@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Notes</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/vue@2.6.14/dist/vue.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+
+<body class="bg-gray-100">
+    <div id="app" class="container mx-auto p-4">
+        <h1 class="text-3xl font-bold mb-4">Notes</h1>
+        <div class="flex mb-4">
+            <input v-model="search" placeholder="Search notes" class="p-2 border rounded mr-2">
+            <button @click="newNote" class="bg-blue-500 text-white p-2 rounded">New Note</button>
+        </div>
+        <div class="flex">
+            <div class="w-1/3 pr-4">
+                <h2 class="text-xl font-semibold mb-2">Note List</h2>
+                <ul>
+                    <li v-for="note in filteredNotes" :key="note.id" @click="selectNote(note)"
+                        class="cursor-pointer p-2 hover:bg-gray-200"
+                        :class="{'bg-blue-100': selectedNote && note.id === selectedNote.id}">
+                        [[ note.title ]]
+                    </li>
+                </ul>
+            </div>
+            <div v-if="selectedNote" class="w-2/3">
+                <input v-model="selectedNote.title" class="w-full p-2 mb-2 border rounded">
+                <textarea id="editor" ref="editor"></textarea>
+                <div class="mt-2">
+                    <input v-model="tagInput" @keyup.enter="addTag" placeholder="Add tags"
+                        class="p-2 border rounded mr-2">
+                    <div class="mt-2">
+                        <span v-for="tag in selectedNote.tags" :key="tag"
+                            class="inline-block bg-gray-200 rounded-full px-3 py-1 text-sm font-semibold text-gray-700 mr-2 mb-2">
+                            [[ tag ]]
+                            <button @click="removeTag(tag)" class="ml-1 text-red-500">&times;</button>
+                        </span>
+                    </div>
+                </div>
+                <button @click="saveNote" class="mt-4 bg-green-500 text-white p-2 rounded">Save Note</button>
+                <button @click="deleteNote" class="mt-4 ml-2 bg-red-500 text-white p-2 rounded">Delete Note</button>
+            </div>
+        </div>
+    </div>
+    <script>
+        new Vue({
+            el: '#app',
+            delimiters: ['[[', ']]'],
+            data: {
+                notes: [],
+                selectedNote: null,
+                search: '',
+                tagInput: '',
+                editor: null
+            },
+            computed: {
+                filteredNotes() {
+                    return this.notes.filter(note =>
+                        note.title.toLowerCase().includes(this.search.toLowerCase()) ||
+                        note.content.toLowerCase().includes(this.search.toLowerCase()) ||
+                        note.tags.some(tag => tag.toLowerCase().includes(this.search.toLowerCase()))
+                    );
+                }
+            },
+            methods: {
+                fetchNotes() {
+                    // Implement API call to fetch notes
+                    // For now, we'll use dummy data
+                    this.notes = [
+                        { id: 1, title: 'Note 1', content: 'Content 1', tags: ['tag1', 'tag2'] },
+                        { id: 2, title: 'Note 2', content: 'Content 2', tags: ['tag2', 'tag3'] }
+                    ];
+                },
+                selectNote(note) {
+                    this.selectedNote = { ...note };
+                    this.$nextTick(() => {
+                        this.editor.value(this.selectedNote.content);
+                    });
+                },
+                newNote() {
+                    this.selectedNote = { id: Date.now(), title: 'New Note', content: '', tags: [] };
+                    this.$nextTick(() => {
+                        this.editor.value('');
+                    });
+                },
+                saveNote() {
+                    // Implement API call to save note
+                    this.selectedNote.content = this.editor.value();
+                    const index = this.notes.findIndex(n => n.id === this.selectedNote.id);
+                    if (index !== -1) {
+                        this.notes[index] = { ...this.selectedNote };
+                    } else {
+                        this.notes.push({ ...this.selectedNote });
+                    }
+                },
+                deleteNote() {
+                    // Implement API call to delete note
+                    this.notes = this.notes.filter(n => n.id !== this.selectedNote.id);
+                    this.selectedNote = null;
+                },
+                addTag() {
+                    if (this.tagInput && !this.selectedNote.tags.includes(this.tagInput)) {
+                        this.selectedNote.tags.push(this.tagInput);
+                        this.tagInput = '';
+                    }
+                },
+                removeTag(tag) {
+                    this.selectedNote.tags = this.selectedNote.tags.filter(t => t !== tag);
+                }
+            },
+            mounted() {
+                this.fetchNotes();
+                this.editor = new EasyMDE({
+                    element: this.$refs.editor,
+                    spellChecker: false,
+                    autosave: {
+                        enabled: true,
+                        uniqueId: "myUniqueID",
+                    },
+                });
+            }
+        });
+    </script>
+</body>
+
+</html>

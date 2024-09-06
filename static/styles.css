@@ -1,0 +1,23 @@
+.container {
+    display: flex;
+    justify-content: space-around;
+    padding: 20px;
+}
+
+.web-view {
+    border: 1px solid #ccc;
+    padding: 10px;
+    width: 100%;
+}
+
+.controls {
+    max-width: 300px;
+}
+
+#elementsList {
+    margin-top: 20px;
+}
+
+button {
+    margin-top: 10px;
+}

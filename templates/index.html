@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web Interaction App</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+
+<body>
+    <div class="container">
+        <div class="web-view">
+            <iframe id="webPreview" width="300" height="500"></iframe>
+        </div>
+        <div class="controls">
+            <input type="text" id="urlInput" placeholder="Enter URL">
+            <button onclick="loadWebsite()">Load Website</button>
+            <div id="elementsList"></div>
+            <button onclick="runInstructions()">Run Instructions</button>
+        </div>
+    </div>
+
+    <script>
+        let instructions = [];
+
+        function loadWebsite() {
+            const url = document.getElementById('urlInput').value;
+            fetch('/load', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: url })
+            })
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('webPreview').src = url;
+                    let elementsList = document.getElementById('elementsList');
+                    elementsList.innerHTML = '';
+                    data.forEach(element => {
+                        let elemDiv = document.createElement('div');
+                        elemDiv.setAttribute('class', 'element');
+
+                        if (element.action === 'input') {
+                            elemDiv.innerHTML = `<b>${element.tag}</b> ID: ${element.id}
+                            <input type="text" placeholder="${element.placeholder || 'Enter value'}" id="input_${element.id}">`;
+                        } else if (element.action === 'click') {
+                            elemDiv.innerHTML = `<b>${element.tag}</b> ID: ${element.id}
+                            <input type="checkbox" id="click_${element.id}"> <label for="click_${element.id}">Click</label>`;
+                        } else if (element.action === 'select') {
+                            let options = element.options.map(option => `<option value="${option}">${option}</option>`).join('');
+                            elemDiv.innerHTML = `<b>${element.tag}</b> ID: ${element.id}
+                            <select id="select_${element.id}">${options}</select>
+                            <input type="checkbox" id="select_check_${element.id}"> <label for="select_check_${element.id}">Select</label>`;
+                        } else if (element.action === 'file') {
+                            elemDiv.innerHTML = `<b>${element.tag}</b> ID: ${element.id}
+                            <input type="file" id="file_${element.id}">`;
+                        }
+
+                        elementsList.appendChild(elemDiv);
+                    });
+                });
+        }
+
+        function collectInstructions() {
+            instructions = [];  // Clear previous instructions
+            const elements = document.querySelectorAll('.element');
+
+            elements.forEach(elem => {
+                const id = elem.querySelector('b').innerText.split(' ').pop();
+
+                // Handle input fields
+                const input = elem.querySelector(`input[type="text"]`);
+                if (input && input.value) {
+                    instructions.push({ element_id: id, action: 'input', value: input.value });
+                }
+
+                // Handle click checkboxes
+                const clickCheckbox = elem.querySelector(`input[type="checkbox"][id^="click_"]`);
+                if (clickCheckbox && clickCheckbox.checked) {
+                    instructions.push({ element_id: id, action: 'click' });
+                }
+
+                // Handle select elements
+                const selectCheckbox = elem.querySelector(`input[type="checkbox"][id^="select_check_"]`);
+                const select = elem.querySelector('select');
+                if (selectCheckbox && selectCheckbox.checked && select) {
+                    instructions.push({ element_id: id, action: 'select', value: select.value });
+                }
+
+                // Handle file inputs
+                const fileInput = elem.querySelector(`input[type="file"]`);
+                if (fileInput && fileInput.files.length > 0) {
+                    const file = fileInput.files[0];
+                    const filePath = file.webkitRelativePath || file.name;  // Simplified path handling for demo
+                    instructions.push({ element_id: id, action: 'file', value: filePath });
+                }
+            });
+        }
+
+        function runInstructions() {
+            collectInstructions();  // Collect all selected instructions before running
+            const url = document.getElementById('urlInput').value;
+            fetch('/interact', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: url, instructions: instructions })
+            })
+                .then(response => response.json())
+                .then(data => {
+                    alert(data.results.join('\n'));
+                    instructions = [];  // Clear instructions after running
+                });
+        }
+    </script>
+</body>
+
+</html>
