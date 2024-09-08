@@ -53,7 +53,7 @@ class User(db.Model):
     password_hash = db.Column(db.String(255))  # Increased from 128 to 255
     is_google_account = db.Column(db.Boolean, default=False)
     google_id = db.Column(db.String(128), unique=True, nullable=True)
-    notes = db.relationship('Note', back_populates='user', lazy='dynamic')  # Changed 'user' to 'author'
+    # notes = db.relationship('Note', back_populates='user', lazy='dynamic')  # Changed 'user' to 'author'
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -82,38 +82,6 @@ class User(db.Model):
             db.session.commit()
             return user, True
 
-# Association table for note links
-note_links = Table('note_links', db.Model.metadata,
-    Column('source_id', Integer, ForeignKey('note.id')),
-    Column('target_id', Integer, ForeignKey('note.id'))
-)
-
-
-class Note(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    title = db.Column(db.String(200), nullable=False)
-    content = db.Column(db.Text)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-    user = relationship('User', back_populates='notes')
-    tags = relationship('Tag', secondary='note_tags', back_populates='notes')
-    linked_to = relationship(
-        'Note', secondary=note_links,
-        primaryjoin=(note_links.c.source_id == id),
-        secondaryjoin=(note_links.c.target_id == id),
-        backref='linked_from'
-    )
-
-class Tag(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(50), nullable=False, unique=True)
-    notes = relationship('Note', secondary='note_tags', back_populates='tags')
-
-note_tags = Table('note_tags', db.Model.metadata,
-    Column('note_id', Integer, ForeignKey('note.id')),
-    Column('tag_id', Integer, ForeignKey('tag.id'))
-)
 
 # Set up JWT
 app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'your_jwt_secret_key')
@@ -381,125 +349,7 @@ def register():
     return render_template('register.html')
 
 
-# API routes
-@app.route('/api/notes', methods=['GET', 'POST'])
-def handle_notes():
-    if 'user' not in session:
-        return jsonify({'error': 'Unauthorized'}), 401
 
-    user_id = session['user']['id']
-
-    if request.method == 'GET':
-        notes = Note.query.filter_by(user_id=user_id).all()
-        return jsonify([{
-            'id': note.id,
-            'title': note.title,
-            'content': note.content,
-            'created_at': note.created_at.isoformat(),
-            'updated_at': note.updated_at.isoformat(),
-            'tags': [tag.name for tag in note.tags],
-            'links': [link.id for link in note.linked_to]
-        } for note in notes])
-
-    elif request.method == 'POST':
-        data = request.json
-        new_note = Note(
-            title=data['title'],
-            content=data['content'],
-            user_id=user_id
-        )
-
-        # Handle tags
-        for tag_name in data.get('tags', []):
-            tag = Tag.query.filter_by(name=tag_name).first()
-            if not tag:
-                tag = Tag(name=tag_name)
-            new_note.tags.append(tag)
-
-        # Handle links
-        for link_id in data.get('links', []):
-            linked_note = Note.query.get(link_id)
-            if linked_note and linked_note.user_id == user_id:
-                new_note.linked_to.append(linked_note)
-
-        db.session.add(new_note)
-        db.session.commit()
-
-        return jsonify({
-            'id': new_note.id,
-            'title': new_note.title,
-            'content': new_note.content,
-            'created_at': new_note.created_at.isoformat(),
-            'updated_at': new_note.updated_at.isoformat(),
-            'tags': [tag.name for tag in new_note.tags],
-            'links': [link.id for link in new_note.linked_to]
-        }), 201
-
-@app.route('/api/notes/<int:note_id>', methods=['GET', 'PUT', 'DELETE'])
-def handle_note(note_id):
-    if 'user' not in session:
-        return jsonify({'error': 'Unauthorized'}), 401
-
-    user_id = session['user']['id']
-    note = Note.query.filter_by(id=note_id, user_id=user_id).first()
-
-    if not note:
-        return jsonify({'error': 'Note not found'}), 404
-
-    if request.method == 'GET':
-        return jsonify({
-            'id': note.id,
-            'title': note.title,
-            'content': note.content,
-            'created_at': note.created_at.isoformat(),
-            'updated_at': note.updated_at.isoformat(),
-            'tags': [tag.name for tag in note.tags],
-            'links': [link.id for link in note.linked_to]
-        })
-
-    elif request.method == 'PUT':
-        data = request.json
-        note.title = data.get('title', note.title)
-        note.content = data.get('content', note.content)
-
-        # Update tags
-        note.tags = []
-        for tag_name in data.get('tags', []):
-            tag = Tag.query.filter_by(name=tag_name).first()
-            if not tag:
-                tag = Tag(name=tag_name)
-            note.tags.append(tag)
-
-        # Update links
-        note.linked_to = []
-        for link_id in data.get('links', []):
-            linked_note = Note.query.get(link_id)
-            if linked_note and linked_note.user_id == user_id:
-                note.linked_to.append(linked_note)
-
-        db.session.commit()
-
-        return jsonify({
-            'id': note.id,
-            'title': note.title,
-            'content': note.content,
-            'created_at': note.created_at.isoformat(),
-            'updated_at': note.updated_at.isoformat(),
-            'tags': [tag.name for tag in note.tags],
-            'links': [link.id for link in note.linked_to]
-        })
-
-    elif request.method == 'DELETE':
-        db.session.delete(note)
-        db.session.commit()
-        return '', 204
-
-@app.route('/notes')
-def notes_page():
-    if 'user' not in session:
-        flash('Please sign in to access your notes.', 'warning')
-        return redirect(url_for('login'))
-    return render_template('notes.html')
 
 if __name__ == '__main__':
     with app.app_context():
